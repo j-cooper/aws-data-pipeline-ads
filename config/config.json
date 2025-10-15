@@ -1,0 +1,69 @@
+{
+  "project": {
+    "name": "AWS Data Pipeline",
+    "version": "1.0.0",
+    "description": "ETL pipeline using AWS Lambda and S3"
+  },
+  "aws": {
+    "region": "us-east-1",
+    "services": {
+      "s3": {
+        "bucket_name": "j-cooper-data-pipeline-2025",
+        "folders": {
+          "data": "data/",
+          "metadata": "metadata/",
+          "manifest": "manifest/",
+          "temp": "temp/",
+          "logs": "logs/"
+        }
+      },
+      "lambda": {
+        "function_name": "data-pipeline-etl",
+        "timeout": 60,
+        "memory_size": 256,
+        "runtime": "python3.9"
+      },
+      "secrets_manager": {
+        "secret_name": "data-pipeline-config"
+      }
+    }
+  },
+  "data_sources": {
+    "marketing": {
+      "name": "FakeStore API",
+      "url": "https://fakestoreapi.com/products",
+      "type": "rest_api",
+      "format": "json",
+      "auth_required": false,
+      "rate_limit": null
+    },
+    "sales": {
+      "name": "JSONPlaceholder",
+      "url": "https://jsonplaceholder.typicode.com/posts",
+      "type": "rest_api",
+      "format": "json",
+      "auth_required": false,
+      "rate_limit": null
+    },
+    "crm": {
+      "name": "RandomUser API",
+      "url": "https://randomuser.me/api/?results=50",
+      "type": "rest_api",
+      "format": "json",
+      "auth_required": false,
+      "rate_limit": null
+    }
+  },
+  "processing": {
+    "batch_size": 100,
+    "parallel_processing": false,
+    "error_handling": "continue",
+    "retry_attempts": 3,
+    "retry_delay": 5
+  },
+  "monitoring": {
+    "cloudwatch_logs": true,
+    "metrics_enabled": true,
+    "alarm_email": null
+  }
+}
