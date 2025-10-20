@@ -1,18 +1,18 @@
 """
-AWS Lambda ETL Function
-This is the main function that runs in the cloud
-It extracts data from APIs, transforms it, and loads to S3
+Local testing version with SSL workaround
 """
 
 import json
 import boto3
 import urllib3
-from datetime import datetime, timedelta
+from datetime import datetime
 import hashlib
 import os
 import logging
 from typing import Dict, List, Any, Optional
 import traceback
+import ssl
+import certifi
 
 # Set up logging
 logger = logging.getLogger()
@@ -22,8 +22,18 @@ logger.setLevel(logging.INFO)
 s3_client = boto3.client('s3')
 secrets_client = boto3.client('secretsmanager')
 
-# Initialize HTTP client for API calls
-http = urllib3.PoolManager()
+# Initialize HTTP client with proper SSL context for Mac
+# Create custom SSL context
+ssl_context = ssl.create_default_context(cafile=certifi.where())
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_REQUIRED
+
+# For local testing on Mac, we need to handle SSL differently
+http = urllib3.PoolManager(
+    cert_reqs='CERT_REQUIRED',
+    ca_certs=certifi.where(),
+    ssl_context=ssl_context
+)
 
 # Environment variables
 BUCKET_NAME = os.environ.get('BUCKET_NAME')
@@ -34,19 +44,12 @@ AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 def lambda_handler(event: Dict, context: Any) -> Dict:
     """
     Main Lambda handler - this is what AWS calls
-    
-    Args:
-        event: Event data from AWS (triggers, parameters, etc.)
-        context: Runtime information about the Lambda function
-        
-    Returns:
-        Response with status code and execution results
     """
     
     # Start execution
     start_time = datetime.now()
     logger.info("=" * 60)
-    logger.info("🚀 DATA PIPELINE EXECUTION STARTED")
+    logger.info("🚀 DATA PIPELINE EXECUTION STARTED (Local Mode)")
     logger.info(f"⏰ Start Time: {start_time.isoformat()}")
     logger.info(f"📦 Bucket: {BUCKET_NAME}")
     logger.info("=" * 60)
@@ -65,12 +68,12 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     }
     
     try:
-        # Step 1: Get configuration from Secrets Manager
+        # Step 1: Get configuration
         logger.info("\n📋 Step 1: Loading configuration...")
         config = get_configuration()
         
         if not config:
-            raise Exception("Failed to load configuration from Secrets Manager")
+            raise Exception("Failed to load configuration")
         
         logger.info(f"   ✅ Configuration loaded")
         logger.info(f"   📊 Data sources to process: {len(config['data_sources'])}")
@@ -83,7 +86,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
             
             try:
                 # Extract data from API
-                raw_data = extract_data(source_name, source_config)
+                raw_data = extract_data_safe(source_name, source_config)
                 
                 if raw_data:
                     # Transform the data
@@ -105,8 +108,6 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
                 error_msg = f"Error processing {source_name}: {str(e)}"
                 logger.error(f"   ❌ {error_msg}")
                 results['errors'].append(error_msg)
-                
-                # Continue with other sources even if one fails
                 continue
         
         # Step 3: Generate summary
@@ -138,7 +139,6 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     logger.info(f"✅ Status: {'SUCCESS' if results['success'] else 'FAILED'}")
     logger.info("=" * 60)
     
-    # Return response
     return {
         'statusCode': 200 if results['success'] else 500,
         'body': json.dumps(results, default=str),
@@ -149,118 +149,195 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
 
 
 def get_configuration() -> Optional[Dict]:
-    """
-    Retrieve configuration from AWS Secrets Manager
-    
-    Returns:
-        Configuration dictionary or None if error
-    """
+    """Get configuration - with fallback for local testing"""
     try:
         response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
         config = json.loads(response['SecretString'])
         return config
-        
     except Exception as e:
-        logger.error(f"Failed to get configuration: {e}")
+        logger.warning(f"Cannot get config from Secrets Manager: {e}")
+        logger.info("Using default configuration...")
         
-        # Return default configuration as fallback
+        # Return default configuration
         return {
             'data_sources': {
                 'marketing': {
                     'name': 'FakeStore API',
-                    'url': 'https://fakestoreapi.com/products?limit=10',
+                    'url': 'https://fakestoreapi.com/products',
                     'default_limit': 10
                 },
                 'sales': {
                     'name': 'JSONPlaceholder',
-                    'url': 'https://jsonplaceholder.typicode.com/posts?_limit=10',
+                    'url': 'https://jsonplaceholder.typicode.com/posts',
                     'default_limit': 10
                 },
                 'crm': {
                     'name': 'RandomUser API',
-                    'url': 'https://randomuser.me/api/?results=10',
+                    'url': 'https://randomuser.me/api/',
                     'default_limit': 10
                 }
             }
         }
 
 
-def extract_data(source_name: str, config: Dict) -> Optional[List]:
-    """
-    Extract data from an API endpoint
+def extract_data_safe(source_name: str, config: Dict) -> Optional[List]:
+    """Extract data with better error handling and correct URLs"""
     
-    Args:
-        source_name: Name of the data source
-        config: Configuration for this source
-        
-    Returns:
-        List of records or None if error
-    """
+    # Try using requests library first (better SSL handling)
     try:
-        # Build URL with limit
-        url = config['url']
-        if '?' in url:
-            url += f"&limit={config.get('default_limit', 20)}"
+        import requests
+        
+        # Build correct URLs for each API
+        if source_name == 'marketing':
+            # FakeStore API - supports ?limit parameter
+            url = "https://fakestoreapi.com/products"
+            params = {'limit': config.get('default_limit', 10)}
+            
+        elif source_name == 'sales':
+            # JSONPlaceholder - use different endpoint format
+            # Gets first N posts directly
+            limit = config.get('default_limit', 10)
+            url = f"https://jsonplaceholder.typicode.com/posts"
+            params = {'_limit': limit}  # JSONPlaceholder uses _limit
+            
+        elif source_name == 'crm':
+            # RandomUser API - uses ?results parameter
+            url = "https://randomuser.me/api/"
+            params = {'results': config.get('default_limit', 10)}
         else:
-            url += f"?limit={config.get('default_limit', 20)}"
+            url = config['url']
+            params = {}
         
-        logger.info(f"      🔗 Fetching from: {url[:100]}...")
+        logger.info(f"      🔗 Fetching from: {url}")
+        logger.info(f"      📊 Parameters: {params}")
         
-        # Make HTTP request
-        response = http.request(
-            'GET',
-            url,
-            timeout=config.get('timeout', 30),
-            retries=config.get('max_retries', 3)
+        # Make request with timeout
+        response = requests.get(
+            url, 
+            params=params,
+            timeout=30, 
+            verify=certifi.where(),
+            headers={
+                'User-Agent': 'Mozilla/5.0 (compatible; DataPipeline/1.0)',
+                'Accept': 'application/json'
+            }
         )
         
-        if response.status != 200:
-            logger.error(f"      ❌ HTTP {response.status}")
+        logger.info(f"      📡 Response status: {response.status_code}")
+        
+        if response.status_code != 200:
+            logger.error(f"      ❌ HTTP {response.status_code}")
+            logger.error(f"      Response: {response.text[:200]}")
             return None
         
-        # Parse JSON response
-        data = json.loads(response.data.decode('utf-8'))
+        # Parse JSON
+        try:
+            data = response.json()
+        except json.JSONDecodeError as e:
+            logger.error(f"      ❌ Invalid JSON response: {e}")
+            logger.error(f"      Response text: {response.text[:200]}")
+            return None
         
         # Handle different response formats
         if isinstance(data, dict):
             if 'results' in data:  # RandomUser format
                 return data['results']
-            elif 'data' in data:  # Some APIs wrap in 'data'
+            elif 'data' in data:
                 return data['data']
-            elif 'products' in data:  # Some e-commerce APIs
+            elif 'products' in data:
                 return data['products']
             else:
                 # Single object, wrap in list
                 return [data]
         elif isinstance(data, list):
-            return data
+            return data[:config.get('default_limit', 10)]  # Ensure we respect limit
         else:
             return [data]
             
+    except ImportError:
+        logger.warning("requests library not available, using urllib3")
+        
+        # Fallback to urllib3 with SSL workaround
+        try:
+            import ssl
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            http_local = urllib3.PoolManager(
+                cert_reqs='CERT_NONE',
+                ssl_context=ssl_context
+            )
+            
+            # Build URLs with correct parameters
+            if source_name == 'marketing':
+                url = f"https://fakestoreapi.com/products?limit={config.get('default_limit', 10)}"
+            elif source_name == 'sales':
+                # Use the correct JSONPlaceholder endpoint
+                limit = config.get('default_limit', 10)
+                url = f"https://jsonplaceholder.typicode.com/posts?_limit={limit}"
+            elif source_name == 'crm':
+                url = f"https://randomuser.me/api/?results={config.get('default_limit', 10)}"
+            else:
+                url = config['url']
+            
+            logger.info(f"      🔗 Fetching (urllib3): {url}")
+            
+            response = http_local.request(
+                'GET', 
+                url, 
+                timeout=30,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (compatible; DataPipeline/1.0)',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            logger.info(f"      📡 Response status: {response.status}")
+            
+            if response.status != 200:
+                logger.error(f"      ❌ HTTP {response.status}")
+                return None
+            
+            # Parse JSON
+            try:
+                data = json.loads(response.data.decode('utf-8'))
+            except json.JSONDecodeError as e:
+                logger.error(f"      ❌ Invalid JSON: {e}")
+                logger.error(f"      Response: {response.data[:200]}")
+                return None
+            
+            if isinstance(data, dict):
+                if 'results' in data:
+                    return data['results']
+                elif 'data' in data:
+                    return data['data']
+                else:
+                    return [data]
+            elif isinstance(data, list):
+                return data[:config.get('default_limit', 10)]
+            else:
+                return [data]
+                
+        except Exception as e:
+            logger.error(f"      ❌ Extract error: {e}")
+            return None
+            
     except Exception as e:
         logger.error(f"      ❌ Extract error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 
 def transform_data(source_name: str, raw_data: List) -> List[Dict]:
-    """
-    Transform raw data into standardized format
-    
-    Args:
-        source_name: Name of the data source
-        raw_data: Raw data from API
-        
-    Returns:
-        List of transformed records
-    """
+    """Transform raw data into standardized format"""
     transformed = []
     
     for idx, record in enumerate(raw_data):
-        # Generate unique ID
         unique_string = f"{source_name}_{idx}_{datetime.now().isoformat()}_{json.dumps(record)}"
         record_id = hashlib.md5(unique_string.encode()).hexdigest()[:12]
         
-        # Create standardized record
         transformed_record = {
             'record_id': record_id,
             'source': source_name,
@@ -269,21 +346,18 @@ def transform_data(source_name: str, raw_data: List) -> List[Dict]:
             'raw_data': record
         }
         
-        # Add source-specific transformations
         if source_name == 'marketing':
-            # FakeStore product data
             transformed_record['product'] = {
                 'id': record.get('id'),
                 'title': record.get('title', ''),
                 'price': float(record.get('price', 0)),
                 'category': record.get('category', ''),
-                'description': record.get('description', '')[:200],  # Limit description length
+                'description': record.get('description', '')[:200],
                 'image': record.get('image', ''),
                 'rating': record.get('rating', {})
             }
             
         elif source_name == 'sales':
-            # JSONPlaceholder post data (simulated sales)
             transformed_record['sale'] = {
                 'id': record.get('id'),
                 'user_id': record.get('userId'),
@@ -292,7 +366,6 @@ def transform_data(source_name: str, raw_data: List) -> List[Dict]:
             }
             
         elif source_name == 'crm':
-            # RandomUser customer data
             if 'name' in record:
                 name = record['name']
                 transformed_record['customer'] = {
@@ -312,23 +385,12 @@ def transform_data(source_name: str, raw_data: List) -> List[Dict]:
 
 
 def load_to_s3(source_name: str, data: List[Dict]) -> str:
-    """
-    Load transformed data to S3
-    
-    Args:
-        source_name: Name of the data source
-        data: Transformed data to save
-        
-    Returns:
-        S3 path where data was saved
-    """
-    # Generate S3 key with date partitioning
+    """Load transformed data to S3"""
     current_date = datetime.now().strftime('%Y-%m-%d')
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
     s3_key = f"data/{source_name}/date={current_date}/{source_name}_{timestamp}.json"
     
-    # Add metadata
     metadata = {
         'source': source_name,
         'record_count': str(len(data)),
@@ -336,7 +398,6 @@ def load_to_s3(source_name: str, data: List[Dict]) -> str:
         'extracted_timestamp': datetime.now().isoformat()
     }
     
-    # Upload to S3
     s3_client.put_object(
         Bucket=BUCKET_NAME,
         Key=s3_key,
@@ -351,17 +412,7 @@ def load_to_s3(source_name: str, data: List[Dict]) -> str:
 
 
 def save_execution_summary(results: Dict, config: Dict) -> str:
-    """
-    Save execution summary to S3
-    
-    Args:
-        results: Execution results
-        config: Configuration used
-        
-    Returns:
-        S3 path where summary was saved
-    """
-    # Create summary
+    """Save execution summary to S3"""
     summary = {
         'execution_id': results['execution_id'],
         'execution_date': datetime.now().strftime('%Y-%m-%d'),
@@ -380,7 +431,6 @@ def save_execution_summary(results: Dict, config: Dict) -> str:
         'errors': results['errors']
     }
     
-    # Save to S3
     current_date = datetime.now().strftime('%Y-%m-%d')
     s3_key = f"metadata/executions/date={current_date}/execution_{results['execution_id']}.json"
     
@@ -400,22 +450,33 @@ def save_execution_summary(results: Dict, config: Dict) -> str:
 if __name__ == "__main__":
     import sys
     
-    # Set environment variables for local testing
+    # Install required packages for local testing
+    try:
+        import requests
+    except ImportError:
+        print("📦 Installing requests library for better SSL handling...")
+        os.system("pip install requests")
+        import requests
+    
+    try:
+        import certifi
+    except ImportError:
+        print("📦 Installing certifi for SSL certificates...")
+        os.system("pip install certifi")
+        import certifi
+    
     if not BUCKET_NAME:
         print("⚠️  Please set BUCKET_NAME environment variable")
         print("   export BUCKET_NAME=your-bucket-name")
         sys.exit(1)
     
-    # Create mock context
     class MockContext:
         request_id = f"local-test-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         function_name = "data-pipeline-etl"
         function_version = "$LATEST"
         
-    # Run the function
-    print("🧪 Running Lambda function locally...")
+    print("🧪 Running Lambda function locally with SSL fixes...")
     result = lambda_handler({}, MockContext())
     
-    # Print results
     print("\n📊 Execution Results:")
     print(json.dumps(json.loads(result['body']), indent=2))
