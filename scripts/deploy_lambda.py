@@ -12,7 +12,7 @@ from botocore.exceptions import ClientError
 # Configuration
 FUNCTION_NAME = 'data-pipeline-etl'
 ROLE_NAME = 'lambda-data-pipeline-role'
-RUNTIME = 'python3.9'
+RUNTIME = 'python3.10'
 TIMEOUT = 60
 MEMORY_SIZE = 256
 

@@ -21,7 +21,7 @@
         "function_name": "data-pipeline-etl",
         "timeout": 60,
         "memory_size": 256,
-        "runtime": "python3.9"
+        "runtime": "python3.10"
       },
       "secrets_manager": {
         "secret_name": "data-pipeline-config"
